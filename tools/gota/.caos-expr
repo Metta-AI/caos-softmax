@@ -1,0 +1,41 @@
+# tools/gota: drive Softmax's coworld/softmax CLIs (Gods of the Arena).
+#
+# The image is built from this directory by caos' flake-builder, named by locator
+# because a client repo has no DEPS mount for it. The rev MUST equal the pin in
+# the root .caos-expr and flake.lock: the same caos that runs the session builds
+# the image.
+#
+# The help is a here-string so editing the docs re-keys only this tool's arg
+# tree, not the image build (design/caos-expr.md). It is a javadoc comment:
+# `@param name` is required, `@param [name]` optional, `{tree}` binds a tree.
+HELP=<<END
+Run Softmax's `coworld` / `softmax` CLIs for Gods of the Arena (gota) inside a
+worker with python 3.12 and network. Authenticates with the `softmax-token`
+secret when present. Returns the command log, ending in GOTA OK or GOTA FAILED;
+a rejected upload or bad request is a result to read, not an error.
+
+Actions:
+  cli     run `program` with `args` (public reads work without a token)
+  status  `softmax status`: whose token is this
+  upload  `coworld upload-policy --file <file> --name <name>` (needs token)
+  play    create the xp-request JSON at `request`, wait, print episode results
+  results print an existing xp-request's state and episode results by `id`
+
+Results are cached by arguments: pass a changing `nonce` to re-poll something
+that has since changed.
+
+@param action One of: cli, status, upload, play, results.
+@param [program] For `cli`: `coworld` or `softmax`.
+@param {array} [args] For `cli`: the arguments, one per element, e.g. ["leagues","--json"].
+@param [filter] For `cli`: an extended regex; only matching lines of the output are returned. Use it on huge output such as `leagues --json`.
+@param [context] For `cli` with `filter`: lines of context around each match. Default 0.
+@param {tree} [files] A conversation-relative directory path (e.g. gota/policy). It is materialized and becomes the working directory, so `file` and `request` are relative to it.
+@param [file] For `upload`: the .bas file inside `files`.
+@param [name] For `upload`: the policy name to register it under.
+@param [request] For `play`: the xp-request JSON file inside `files`.
+@param [wait] For `play`: seconds to wait for the request to finish. Default 900.
+@param [id] For `results`: the xreq_... id.
+@param [nonce] Any changing string, to defeat the result cache.
+END
+IMG=run --base:@@=github:Metta-AI/caos?rev=331acb619f22fb27a9380a8b311c32bec27163c9&dir=std/flake-builder --in:@=.
+curry --base=$IMG --help=$HELP

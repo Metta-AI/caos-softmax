@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# tools/gota: drive Softmax's `coworld` and `softmax` CLIs for Gods of the Arena.
+#
+# This is the image's /worker (see flake.nix). Args arrive at /cas/args/<name>
+# as lazy placeholders: `caos get` before reading, and test with `[ -e ]` for
+# optional ones. The credential is the `softmax-token` secret at
+# /secret/softmax-token; it is never an arg, so it never enters a cache key or
+# the CAS.
+#
+# EXPECTED FAILURES ARE VALUES. A rejected upload or a bad request body is what
+# this tool exists to report, so the log is returned whatever the exit status
+# and the LAST LINE carries it (results are truncated by keeping the tail).
+set -euo pipefail
+
+export HOME=/tmp
+export UV_CACHE_DIR=/tmp/uv-cache
+export XDG_CONFIG_HOME=/tmp/xdg-config
+export XDG_DATA_HOME=/tmp/xdg-data
+export PATH="/tmp/venv/bin:$PATH"
+
+# Pinned, so an unchanged call is a cache hit and a behaviour change in the CLI
+# is a decision rather than a surprise. softmax-cli comes in as a dependency.
+COWORLD_SPEC='coworld[auth]==0.1.55'
+TOKEN_FILE=/secret/softmax-token
+
+LOG=/tmp/gota.log
+
+die() { echo "gota: $*"; exit 1; }
+
+# One optional arg's value, or nothing.
+param() {
+  if [ -e "/cas/args/$1" ]; then
+    caos get "/cas/args/$1"
+    cat "/cas/args/$1"
+  fi
+}
+
+# A directory arg, materialized, with the cwd left inside it so relative file
+# names in `args` mean what the caller sees in the conversation.
+enter_files() {
+  if [ -e /cas/args/files ]; then
+    caos get -r /cas/args/files || die "materializing the files tree"
+    cd /cas/args/files
+  fi
+}
+
+install_clis() {
+  uv venv --quiet /tmp/venv || die "creating the venv"
+  uv pip install --quiet --python /tmp/venv/bin/python "$COWORLD_SPEC" \
+    || die "installing $COWORLD_SPEC"
+}
+
+# `softmax set-token` is how CI hands the CLI a bearer token (Softmax's own
+# workflows do exactly this), which is what a headless worker needs: there is no
+# browser here for `softmax login`.
+login() {
+  if [ ! -s "$TOKEN_FILE" ]; then
+    echo "gota: no $TOKEN_FILE; continuing ANONYMOUS (public reads only)"
+    return 0
+  fi
+  softmax set-token "$(cat "$TOKEN_FILE")" || die "softmax set-token failed"
+}
+
+need_login() {
+  [ -s "$TOKEN_FILE" ] || die "this action needs the softmax-token secret (see the repo's README)"
+}
+
+# xreq_... id from `xp-request create` output.
+xreq_id() { grep -o 'xreq_[A-Za-z0-9_-]*' | head -n1; }
+
+main() {
+  local action
+  action=$(param action)
+  [ -n "$action" ] || die "no action"
+
+  install_clis
+  login
+  enter_files
+
+  case "$action" in
+  cli)
+    local program
+    program=$(param program)
+    case "$program" in softmax | coworld) ;; *) die "program must be softmax or coworld, got '$program'" ;; esac
+    local -a argv=()
+    if [ -e /cas/args/args ]; then
+      caos get /cas/args/args
+      mapfile -t argv < /cas/args/args
+    fi
+    echo "+ $program ${argv[*]}"
+    # Commands like `coworld leagues --json` print megabytes; a filter keeps the
+    # answer readable. -C shows context lines around each match.
+    local filter ctx cmd_status=0
+    filter=$(param filter)
+    ctx=$(param context)
+    : "${ctx:=0}"
+    if [ -n "$filter" ]; then
+      "$program" "${argv[@]}" > /tmp/cli.out 2>&1 || cmd_status=$?
+      grep -E -C "$ctx" -- "$filter" /tmp/cli.out || echo "gota: filter matched nothing"
+      [ "$cmd_status" -eq 0 ] || die "$program exited $cmd_status"
+    else
+      "$program" "${argv[@]}"
+    fi
+    ;;
+
+  status)
+    softmax status
+    ;;
+
+  upload)
+    need_login
+    local file name
+    file=$(param file)
+    name=$(param name)
+    [ -n "$file" ] || die "upload needs 'file' (a .bas path inside the files tree)"
+    [ -n "$name" ] || die "upload needs 'name'"
+    [ -f "$file" ] || die "no such file in the files tree: $file"
+    echo "+ coworld upload-policy --file $file --name $name"
+    coworld upload-policy --file "$file" --name "$name"
+    ;;
+
+  play)
+    need_login
+    local request wait_s id
+    request=$(param request)
+    wait_s=$(param wait)
+    : "${wait_s:=900}"
+    [ -n "$request" ] || die "play needs 'request' (an xp-request JSON path inside the files tree)"
+    [ -f "$request" ] || die "no such file in the files tree: $request"
+    echo "+ coworld xp-request create $request"
+    coworld xp-request create "$request" | tee /tmp/create.out
+    id=$(xreq_id < /tmp/create.out) || true
+    [ -n "$id" ] || die "could not find an xreq_ id in the create output"
+    echo "gota: waiting up to ${wait_s}s for $id"
+    local waited=0
+    while [ "$waited" -lt "$wait_s" ]; do
+      coworld xp-request get "$id" --json > /tmp/xp.json 2>/tmp/xp.err || true
+      if jq -e '(.status // .state // "") | test("complete|finished|succeeded|failed|cancel"; "i")' /tmp/xp.json > /dev/null 2>&1; then
+        break
+      fi
+      sleep 20
+      waited=$((waited + 20))
+    done
+    echo "+ coworld xp-request get $id --json"
+    cat /tmp/xp.json
+    echo "+ coworld xp-request episodes $id --view results --jsonl"
+    coworld xp-request episodes "$id" --view results --jsonl
+    ;;
+
+  results)
+    need_login
+    local id
+    id=$(param id)
+    [ -n "$id" ] || die "results needs 'id' (an xreq_... id)"
+    echo "+ coworld xp-request get $id --json"
+    coworld xp-request get "$id" --json
+    echo "+ coworld xp-request episodes $id --view results --jsonl"
+    coworld xp-request episodes "$id" --view results --jsonl
+    ;;
+
+  *)
+    die "unknown action '$action' (cli, status, upload, play, results)"
+    ;;
+  esac
+}
+
+status=0
+( main ) > "$LOG" 2>&1 || status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo "GOTA FAILED (exit $status)" >> "$LOG"
+else
+  echo "GOTA OK" >> "$LOG"
+fi
+caos put "$LOG" /cas/out
