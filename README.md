@@ -21,18 +21,18 @@ Results are cached by arguments; pass a changing `nonce` to re-poll.
 ### Use it
 
 1. Import this repo into a caos session:
-   `import_source(source="https://github.com/Metta-AI/caos-softmax.git", into="imports/caos-softmax/base")`
+   `import_source(source="https://github.com/Metta-AI/caos-softmax.git", into="imports/caos-softmax")`
 2. Give the session a Softmax token. A worker has no browser, so it authenticates with `softmax set-token`. In your **client repo** (the one whose `.caos-expr` pins caos), add `.caos-secrets/softmax-token`:
 
    ```
    name=softmax-token
    value:env=SOFTMAX_TOKEN
    entropy:env=CAOS_SOFTMAX_TOKEN_ENTROPY
-   reader=imports/caos-softmax/base/tools/gota
+   reader=imports/caos-softmax/tools/gota
    ```
 
    The secret lives in the client repo, not here, because caos matches a secret's `reader=` against the client's tree. Set `SOFTMAX_TOKEN` (from `uv run softmax login`, then `uv run softmax get-token`; it lasts about 24h) and `CAOS_SOFTMAX_TOKEN_ENTROPY` (any random 16+ char string, yours alone) in the environment, and start a new session.
-3. `run_tool imports/caos-softmax/base/tools/gota action=status` to check.
+3. `run_tool imports/caos-softmax/tools/gota action=status` to check.
 
 Without a token the tool runs anonymously: public reads (`coworld leagues --json`) work, upload and play refuse with a clear message.
 
